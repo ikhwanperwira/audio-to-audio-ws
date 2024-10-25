@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Audio Processing</title>
+</head>
+<body>
+    <h1>WebSocket Audio Processing</h1>
+    <button id="start">Start</button>
+
+    <script>
+        // Parameters
+        const TARGET_DOWNSAMPLE_RATE = 16384; // 16 kHz
+        const EXPECTED_BUFFER_SIZE = 1024;
+
+        let audioContext = null;
+        let source = null;
+        let microphoneStream = null;
+        let ws = null;
+
+        document.getElementById("start").addEventListener("click", async () => {
+            try {
+                // Create AudioContext
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const sampleRate = audioContext.sampleRate;
+                console.log('Client Sample Rate:', sampleRate);
+
+                // Return error if target downsample rate is greater than the client sample rate
+                if (TARGET_DOWNSAMPLE_RATE > sampleRate) {
+                    console.error("Target downsample rate is greater than the client sample rate");
+                    return;
+                }
+
+                // Calculate buffer size based on the sample rate and expected buffer size, rounded using pascal number.
+                const CALCULATED_BUFFER_SIZE = Math.pow(2, Math.round(Math.log2((EXPECTED_BUFFER_SIZE * sampleRate) / TARGET_DOWNSAMPLE_RATE)));
+                console.log('Calculated Buffer Size:', CALCULATED_BUFFER_SIZE);
+
+                // Initialize WebSocket with sample rate in the URL path
+                ws = new WebSocket(`ws://localhost:8000/${TARGET_DOWNSAMPLE_RATE}`);
+                ws.binaryType = 'arraybuffer';
+
+                // Get user's microphone input
+                microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                source = audioContext.createMediaStreamSource(microphoneStream);
+
+                const processor = audioContext.createScriptProcessor(CALCULATED_BUFFER_SIZE, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Downsample and send buffer to the server
+                processor.onaudioprocess = function(event) {
+                    const inputBuffer = event.inputBuffer.getChannelData(0);
+
+                    // Downsample the buffer to the target sample rate (16 kHz)
+                    const downsampledBuffer = downsampleBuffer(inputBuffer, sampleRate, TARGET_DOWNSAMPLE_RATE);
+
+                    // Send the downsampled buffer to the server
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(downsampledBuffer.buffer);
+                    }
+                };
+
+                // Handle raw PCM data from the server and play it
+                ws.onmessage = (message) => {
+                    const arrayBuffer = message.data;
+                    playRawAudio(arrayBuffer);
+                };
+
+            } catch (err) {
+                console.error("Error accessing microphone", err);
+            }
+        });
+
+        function downsampleBuffer(buffer, inputSampleRate, targetSampleRate) {
+            if (targetSampleRate === inputSampleRate) return buffer;
+            const sampleRatio = inputSampleRate / targetSampleRate;
+            const newLength = Math.round(buffer.length / sampleRatio);
+            const downsampledBuffer = new Float32Array(newLength);
+
+            for (let i = 0; i < newLength; i++) {
+                downsampledBuffer[i] = buffer[Math.round(i * sampleRatio)];
+            }
+
+            return downsampledBuffer;
+        }
+
+        function playRawAudio(arrayBuffer) {
+            const audioBuffer = audioContext.createBuffer(1, arrayBuffer.byteLength / 2, TARGET_DOWNSAMPLE_RATE);
+            const float32Array = new Float32Array(arrayBuffer);
+            audioBuffer.copyToChannel(float32Array, 0);
+
+            const bufferSource = audioContext.createBufferSource();
+            bufferSource.buffer = audioBuffer;
+            bufferSource.connect(audioContext.destination);
+            bufferSource.start();
+        }
+    </script>
+</body>
+</html>
